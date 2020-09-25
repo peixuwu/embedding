@@ -1,0 +1,278 @@
+from point_class import Ph_Point, Vn_Point
+import numpy as np
+import random
+import matplotlib.pyplot as plt
+import scipy.io as sio
+import math
+import networkx as nx
+import copy as cp
+
+#node selection
+def Node_selection(py_node_list, vnode):
+    x = []
+    #Position constraint
+    for i in range(len(py_node_list)):
+        if (vnode.location_x - py_node_list[i].location_x) ** 2 + (vnode.location_y - py_node_list[i].location_y) ** 2 <= 1600:
+            x.append(py_node_list[i])
+    #topsis
+    X = np.empty((len(x), 4))
+    for i in range(len(x)):
+        X[i, 0] = x[i].energy
+        X[i, 1] = x[i].cpu
+        X[i, 2] = np.sum(Physics_Link_Distance_Flag[x[i].index])
+        X[i, 3] = X[i, 2] / np.sum(Physics_Link_Distance[x[i].index])
+    aa = np.sqrt(np.sum(X ** 2, axis=0))
+    X = X * (1 / aa)
+    H = np.sum(X * np.log(X), axis=0) * ((-1) / np.log(len(x)))
+    W = (1 - H) / (len(x) - np.sum(H))
+    X = X * W
+    V_1 = np.max(X, axis=0)
+    V_2 = np.min(X, axis=0)
+    D_1 = np.sqrt(np.sum((X - V_1) ** 2, axis=1))
+    D_2 = np.sqrt(np.sum((X - V_2) ** 2, axis=1))
+    Z = D_2 / (D_1 + D_2)
+    index = np.argmax(Z)
+    vnode.vnset.append(x[index].index)
+
+#K shortest path
+def k_shortest_paths(G, source, target, k=2, weight='weight'):
+    # G is a networkx graph.
+    # source and target are the labels for the source and target of the path.
+    # k is the amount of desired paths.
+    # weight = 'weight' assumes a weighed graph. If this is undesired, use weight = None.
+    A = [nx.dijkstra_path(G, source, target, weight='weight')]
+    A_len = [sum([G[A[0][l]][A[0][l + 1]]['weight'] for l in range(len(A[0]) - 1)])]
+    B = []
+    for i in range(1, k):
+        for j in range(0, len(A[-1]) - 1):
+            Gcopy = cp.deepcopy(G)
+            spurnode = A[-1][j]
+            rootpath = A[-1][:j + 1]
+            for path in A:
+                if rootpath == path[0:j + 1]:  # and len(path) > j?
+                    if Gcopy.has_edge(path[j], path[j + 1]):
+                        Gcopy.remove_edge(path[j], path[j + 1])
+                    if Gcopy.has_edge(path[j + 1], path[j]):
+                        Gcopy.remove_edge(path[j + 1], path[j])
+            for n in rootpath:
+                if n != spurnode:
+                    Gcopy.remove_node(n)
+            try:
+                spurpath = nx.dijkstra_path(Gcopy, spurnode, target, weight='weight')
+                totalpath = rootpath + spurpath[1:]
+                if totalpath not in B:
+                    B += [totalpath]
+            except nx.NetworkXNoPath:
+                continue
+        if len(B) == 0:
+            break
+        lenB = [sum([G[path[l]][path[l + 1]]['weight'] for l in range(len(path) - 1)]) for path in B]
+        B = [p for _, p in sorted(zip(lenB, B))]
+        A.append(B[0])
+        A_len.append(sorted(lenB)[0])
+        B.remove(B[0])
+    return A, A_len
+
+#Path Selection
+def K_short_distance(vnode, k=2):
+    G = nx.Graph()
+    aa = []
+    for i in range(len(Physics_Point_List)):
+        for j in range(len(Physics_Point_List)):
+            distance = math.sqrt((Physics_Point_List[i].location_x - Physics_Point_List[j].location_x) ** 2 + (Physics_Point_List[i].location_y - Physics_Point_List[j].location_y) ** 2)
+            if distance < 30 and j != i:
+                aa.append((Physics_Point_List[i].index, Physics_Point_List[j].index, distance))
+    G.add_weighted_edges_from(aa) 
+    aa, _ = k_shortest_paths(G, vnode.vnset[0], Physics_Point_List[-1].index, k=2, weight="weight")
+    m_total = []
+    P_total = []
+    for i in aa:
+        p = 0
+        p_list = []
+        for j in range(len(i) - 1):
+            if j == 0:
+                distance = (Physics_Point_List[i[j]].location_x - Physics_Point_List[i[j + 1]].location_x)  ** 2 + (Physics_Point_List[i[j]].location_y - Physics_Point_List[i[j + 1]].location_y) ** 2
+                distance = np.sqrt(distance)
+                p += (50 * 10 **(-9) + 0.0013 * 10 **(-12) * distance ** 4 + 5 * 10 **(-9)) * vnode.W
+            else:
+                distance = (Physics_Point_List[i[j]].location_x - Physics_Point_List[i[j + 1]].location_x)  ** 2 + (Physics_Point_List[i[j]].location_y - Physics_Point_List[i[j + 1]].location_y) ** 2
+                distance = np.sqrt(distance)
+                p += (50 * 10 **(-9) + 0.0013 * 10 **(-12) * distance ** 4) * vnode.W
+                p += 50 * 10 ** (-9) * vnode.W
+            p_list.append(p)
+        P_total.append(p_list)
+        m = np.min([Physics_Point_List[k].energy for k in i])
+        m_total.append(p / m)
+    link = np.argmin(m_total)
+    P_link = P_total[link]
+    for i in range(len(aa[link]) - 1):
+        if i == 0:
+            if Physics_Point_List[aa[link][i]].cpu - vnode.cpu < 0 or Physics_Point_List[aa[link][i]].W - vnode.W < 0 or Physics_Point_List[aa[link][i]].energy - P_link[i] * vnode.life < 0:
+                return False
+        else:
+            if Physics_Point_List[aa[link][i]].W - vnode.W < 0 or Physics_Point_List[aa[link][i]].energy - P_link[i] * vnode.life < 0:
+                return False
+    for i in range(len(aa[link]) - 1):
+        if i == 0:
+            Physics_Point_List[aa[link][i]].cpu = Physics_Point_List[aa[link][i]].cpu - vnode.cpu
+            Physics_Point_List[aa[link][i]].W = Physics_Point_List[aa[link][i]].W - vnode.W
+            Physics_Point_List[aa[link][i]].energy = Physics_Point_List[aa[link][i]].energy - P_link[i] * vnode.life
+        else:
+            Physics_Point_List[aa[link][i]].W = Physics_Point_List[aa[link][i]].W - vnode.W
+            Physics_Point_List[aa[link][i]].energy = Physics_Point_List[aa[link][i]].energy - P_link[i] * vnode.life
+            vnode.vnset.append(aa[link][i])
+    return True
+
+def gener_phy_point(number, cpu, energy, W):
+    point_list = []
+    location = np.empty((0, 2))
+    for i in range(number):
+        x = random.randrange(0, 100)
+        y = random.randrange(0, 100)
+        point_list.append(Ph_Point(cpu, energy, x, y, W, i))
+        location = np.vstack((location, [x, y]))
+        sio.savemat("location.mat", {"location": location})
+    return point_list
+
+def gener_var_point(number, index):
+    point_list = []
+    # tmpLife = index + 2 + math.floor(random.random() * maxLife)
+    tmpLife = index + 1 + math.floor(np.random.exponential(maxLife))
+    # print( tmpLife)
+    for i in range(number):
+        x = random.randrange(0, 100)
+        y = random.randrange(0, 100)
+        cpu = random.random() * Vn_max_CPU+10
+        w = random.random() * Vn_max_W+10
+        point_list.append(Vn_Point(x, y, cpu, w, i, tmpLife))
+    return point_list
+
+def load_point(cpu, energy, w):
+    Location = sio.loadmat("location.mat")["location"]
+    point_list = []
+    for i in range(len(Location)):
+        point_list.append(Ph_Point(Location[i, 0], Location[i, 1], cpu, energy, w, i))
+    return point_list
+
+def show(aa):
+    bb = np.empty((0, 2))
+    for i in range(len(aa)):
+        bb = np.vstack((bb, [aa[i].location_x, aa[i].location_y]))
+    fig,ax = plt.subplots()
+    ax.scatter(bb[:, 0],bb[:, 1], c='r')
+    for i in range(50):
+        ax.annotate(str(i),(bb[:, 0][i],bb[:, 1][i]))
+    plt.show()
+
+def tiaozhen(aa, num, x, y):
+    aa[num].location_x = x
+    aa[num].location_y = y
+
+def gener_link(point_list):
+    link_distance = np.zeros((len(point_list), len(point_list)))
+    link_distance_flag = np.zeros((len(point_list), len(point_list)))
+    for i in range(len(point_list)):
+        for j in range(len(point_list)):
+            if i != j:
+                distance = (point_list[i].location_x - point_list[j].location_x) ** 2 + (point_list[i].location_y - point_list[j].location_y) ** 2
+                if distance <= 900:
+                    link_distance_flag[i, j] = 1
+                    link_distance[i, j] = math.sqrt(distance)
+    return link_distance_flag, link_distance
+
+def add_resoure(vn):
+    for i in range(len(vn)):
+        # print(vn[i].vnset)
+        for j in vn[i].vnset:
+            if j == vn[i].vnset[0]:
+                Physics_Point_List[j].cpu += vn[i].cpu
+                Physics_Point_List[j].W += vn[i].W
+            else:
+                Physics_Point_List[j].W += vn[i].W
+
+def windows_time():
+    time = 
+    readyQueue = [] 
+    randomSum_total = 0
+    fail_total = 0
+    global Physics_Link_Distance
+    global Physics_Link_Distance_Flag
+    energy_total_time = []
+    for k in range(time):
+        rest_cpu_total = 0
+        cpu_total = 0
+        rest_w_total = 0
+        w_total = 0
+        rest_energy_total = 0
+        for i in range(len(Physics_Point_List) - 1)
+            rest_cpu_total += Physics_Point_List[i].cpu
+            cpu_total += Physics_max_CPU
+            rest_w_total += Physics_Point_List[i].W
+            w_total += Physics_max_W
+            rest_energy_total += Physics_Point_List[i].energy
+            if Physics_Point_List[i].energy <= 0:
+                Physics_Point_List.remove(Physics_Point_List[i])
+                for j in range(len(Physics_Point_List)):
+                    Physics_Point_List[j].index = j
+                    Physics_Link_Distance_Flag, Physics_Link_Distance = gener_link(Physics_Point_List)
+
+        energy_total_time.append(rest_energy_total)
+        if len(energy_total_time) >= 2:
+            xiaohao = energy_total_time[-2] - energy_total_time[-1] + 0.01
+            #print( energy_total_time[-2] / xiaohao)
+
+
+  
+        index_list = []
+        copy_readyQueue = []
+        for index in range(len(readyQueue)):
+            if readyQueue[index][0].life == k:
+                index_list.append(index)
+                add_resoure(readyQueue[index])
+        for i in range(len(readyQueue)):
+            if i not in index_list:
+                copy_readyQueue.append(readyQueue[i])
+        readyQueue = cp.deepcopy(copy_readyQueue)
+      
+        #randomSum = int(math.floor(random.random() * (vnsPerWin + 1) + vnsPerWin * 1 / 2))
+        randomSum = np.random.poisson(vnsPerWin)
+        randomSum_total += randomSum
+       
+        fail = 0
+        for j in range(randomSum):
+            vn_point_num = math.floor(random.random() * 5 + MIN_NODE_PER_REQ)
+            # print( vn_point_num)
+            vn_point_list = gener_var_point(vn_point_num, k)
+            Vn_Py_Point_List_all = []
+            for i in range(len(vn_point_list)):
+                Vn_Point_List = []
+                for kk in range(len(Physics_Point_List) - 1):
+                    if Physics_Point_List[kk].cpu >= vn_point_list[i].cpu and Physics_Point_List[kk].W >= vn_point_list[i].W:
+                        Vn_Point_List.append(Physics_Point_List[kk])
+                if len(Vn_Point_List) != 0:
+                    Vn_Py_Point_List_all.append(Vn_Point_List)
+                else:
+                    break
+            if len(Vn_Py_Point_List_all) == vn_point_num:
+                for i in range(len(vn_point_list)):
+                    Node_selection(Vn_Py_Point_List_all[i], vn_point_list[i])
+                flag_all = 0
+                for i in range(len(vn_point_list)):
+                    if flag == False:
+                        fail += 1
+                        break
+                    flag_all += 1
+                if flag_all == vn_point_num:
+                    readyQueue.append(vn_point_list)
+                else:
+                    add_resoure(vn_point_list[:flag_all])
+            else:
+                fail += 1
+        fail_total += fail
+        #print((randomSum_total - fail_total) / randomSum_total )
+        # print((randomSum - fail) / randomSum * 100)
+
+if __name__ == "__main__":
+    Physics_Point_List = load_point(Physics_max_CPU, Physics_max_energy, Physics_max_W)
+    Physics_Link_Distance_Flag, Physics_Link_Distance = gener_link(Physics_Point_List)
+    windows_time()
